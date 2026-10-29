@@ -1,0 +1,44 @@
+MONITORING SETUP — Prometheus + Grafana (kube-prometheus-stack)
+================================================================
+
+The API already exposes Prometheus metrics at  GET /metrics
+(default Node.js metrics + auction_api_http_requests_total by method/route/status).
+
+1) Install Helm (if needed)
+   curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+2) Add the chart repo
+   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+   helm repo update
+
+3) Install the stack into its own namespace
+   kubectl create namespace monitoring
+   helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring
+
+4) Tell Prometheus to scrape the auction API
+   kubectl apply -f Monitoring/servicemonitor.yaml
+
+5) Open Grafana
+   kubectl port-forward svc/monitoring-grafana 3001:80 -n monitoring
+   -> http://localhost:3001   user: admin
+   Password:
+   kubectl get secret monitoring-grafana -n monitoring -o jsonpath="{.data.admin-password}" | base64 -d ; echo
+
+6) Open Prometheus (check Status -> Targets shows auction/api as UP)
+   kubectl port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090 -n monitoring
+   -> http://localhost:9090
+
+7) Useful PromQL for a Grafana dashboard
+   Requests/sec:     sum(rate(auction_api_http_requests_total[5m])) by (route)
+   Error rate (5xx): sum(rate(auction_api_http_requests_total{status=~"5.."}[5m]))
+   Bids placed/min:  sum(rate(auction_api_http_requests_total{route="/api/auctions/:id/bids",status="201"}[1m])) * 60
+   API memory:       auction_api_process_resident_memory_bytes
+   Pod CPU:          sum(rate(container_cpu_usage_seconds_total{namespace="auction"}[5m])) by (pod)
+
+   Import ready-made dashboards: Grafana -> Dashboards -> New -> Import
+     15760  Kubernetes / Views / Pods
+     11159  Node.js application dashboard
+     7362   MySQL overview (needs mysqld-exporter)
+
+8) Optional: blackbox uptime check of the public site
+   helm install blackbox prometheus-community/prometheus-blackbox-exporter -n monitoring

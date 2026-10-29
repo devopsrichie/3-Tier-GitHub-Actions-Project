@@ -1,0 +1,20 @@
+# Optional: route a domain to the client via ingress-nginx.
+# Install controller: helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx -n ingress-nginx --create-namespace
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: auction-ingress
+  namespace: auction
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: auction.example.com   # change to your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: client
+                port:
+                  number: 80

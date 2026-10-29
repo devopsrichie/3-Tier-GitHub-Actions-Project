@@ -1,0 +1,17 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: auction-api
+  namespace: monitoring
+  labels:
+    release: monitoring   # must match the Helm release name of kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [auction]
+  selector:
+    matchLabels:
+      app: api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

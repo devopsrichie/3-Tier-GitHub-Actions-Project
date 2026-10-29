@@ -1,0 +1,157 @@
+name: Auction 3-Tier CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  API_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/auction-api
+  CLIENT_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/auction-client
+  NAMESPACE: auction
+
+jobs:
+  test-api:
+    name: Test API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  build-client:
+    name: Build Client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  security-scan:
+    name: Trivy filesystem scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: "0"   # set to "1" to fail the build on findings
+
+  docker:
+    name: Build & push images
+    needs: [test-api, build-client, security-scan]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & push API
+        uses: docker/build-push-action@v6
+        with:
+          context: ./api
+          push: true
+          tags: |
+            ${{ env.API_IMAGE }}:${{ github.sha }}
+            ${{ env.API_IMAGE }}:latest
+
+      - name: Build & push Client
+        uses: docker/build-push-action@v6
+        with:
+          context: ./client
+          push: true
+          tags: |
+            ${{ env.CLIENT_IMAGE }}:${{ github.sha }}
+            ${{ env.CLIENT_IMAGE }}:latest
+
+      - name: Scan API image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.API_IMAGE }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+
+  deploy:
+    name: Deploy to Kubernetes
+    needs: docker
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Apply base manifests
+        run: |
+          kubectl apply -f k8s-prod/namespace.yaml
+          kubectl apply -f k8s-prod/sc.yaml
+          # Secrets come from GitHub secrets, never from the repo
+          kubectl create secret generic auction-secrets -n $NAMESPACE \
+            --from-literal=MYSQL_ROOT_PASSWORD='${{ secrets.MYSQL_ROOT_PASSWORD }}' \
+            --from-literal=DB_PASSWORD='${{ secrets.DB_PASSWORD }}' \
+            --from-literal=JWT_SECRET='${{ secrets.JWT_SECRET }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f k8s-prod/configmap.yaml
+          kubectl create configmap mysql-init -n $NAMESPACE \
+            --from-file=init.sql=mysql-init/init.sql --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f k8s-prod/mysql.yaml
+
+      - name: Deploy app tiers
+        run: |
+          sed -i "s|DOCKERHUB_USERNAME/auction-api:latest|${API_IMAGE}:${GITHUB_SHA}|" k8s-prod/api.yaml
+          sed -i "s|DOCKERHUB_USERNAME/auction-client:latest|${CLIENT_IMAGE}:${GITHUB_SHA}|" k8s-prod/client.yaml
+          kubectl apply -f k8s-prod/api.yaml
+          kubectl apply -f k8s-prod/client.yaml
+          kubectl rollout status deployment/api -n $NAMESPACE --timeout=180s
+          kubectl rollout status deployment/client -n $NAMESPACE --timeout=180s
+
+      - name: Show endpoints
+        run: kubectl get svc,pods -n $NAMESPACE -o wide
+
+  notify:
+    name: Slack notification
+    needs: [deploy]
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - name: Notify Slack
+        if: env.SLACK_WEBHOOK_URL != ''
+        run: |
+          STATUS="${{ needs.deploy.result }}"
+          [ "$STATUS" = "success" ] && EMOJI=":white_check_mark:" || EMOJI=":x:"
+          curl -s -X POST -H 'Content-type: application/json' --data "{
+            \"text\": \"${EMOJI} *Auction 3-Tier deploy*: ${STATUS}\nRepo: ${{ github.repository }}\nCommit: ${{ github.sha }}\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+          }" "$SLACK_WEBHOOK_URL"

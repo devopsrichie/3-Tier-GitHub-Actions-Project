@@ -1,0 +1,70 @@
+# Data tier: MySQL 8 StatefulSet with persistent storage.
+# The "mysql-init" ConfigMap is created from mysql-init/init.sql (see README / CI pipelines).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: auction
+spec:
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+    - port: 3306
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: auction
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: auction-secrets, key: MYSQL_ROOT_PASSWORD } }
+            - name: MYSQL_PASSWORD
+              valueFrom: { secretKeyRef: { name: auction-secrets, key: DB_PASSWORD } }
+            - name: MYSQL_USER
+              valueFrom: { configMapKeyRef: { name: auction-config, key: DB_USER } }
+            - name: MYSQL_DATABASE
+              valueFrom: { configMapKeyRef: { name: auction-config, key: DB_NAME } }
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }
+      volumes:
+        - name: init-sql
+          configMap:
+            name: mysql-init
+  volumeClaimTemplates:
+    - metadata:
+        name: mysql-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: auction-storage
+        resources:
+          requests:
+            storage: 5Gi

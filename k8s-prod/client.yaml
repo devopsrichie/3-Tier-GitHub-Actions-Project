@@ -1,0 +1,42 @@
+# Presentation tier: React app served by nginx (proxies /api to the "api" Service)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client
+  namespace: auction
+  labels:
+    app: client
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: client
+  template:
+    metadata:
+      labels:
+        app: client
+    spec:
+      containers:
+        - name: client
+          image: DOCKERHUB_USERNAME/auction-client:latest   # CI replaces this with the commit-tagged image
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /healthz, port: 80 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: client
+  namespace: auction
+spec:
+  type: LoadBalancer   # use NodePort on minikube/kind, or rely on the Ingress below
+  selector:
+    app: client
+  ports:
+    - port: 80
+      targetPort: 80
